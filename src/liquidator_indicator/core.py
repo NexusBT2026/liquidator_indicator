@@ -10,6 +10,13 @@ import numpy as np
 import math
 from datetime import datetime, timezone
 
+# Try to import numba optimizations, fall back to pure Python if not available
+try:
+    from . import numba_optimized
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
+
 DEFAULT_PCT_MERGE = 0.003  # 0.3%
 DEFAULT_LIQ_SIZE_THRESHOLD = 0.1  # BTC minimum for liquidation inference
 
@@ -249,79 +256,147 @@ class Liquidator:
             df = self._inferred_liqs.copy()
         # sort by price and iterate to form clusters
         df = df.sort_values('price').reset_index(drop=True)
-        clusters = []
-        cur = {'prices': [], 'usd': 0.0, 'count': 0, 'ts_first': None, 'ts_last': None, 'sides': {}}
-        for _, row in df.iterrows():
-            p = float(row['price'])
-            u = float(row.get('usd_value') or 0.0)
-            ts = pd.to_datetime(row['timestamp'])
-            side_val = str(row['side']) if pd.notna(row['side']) else 'unknown'
-            if cur['count'] == 0:
-                cur['prices'] = [p]
-                cur['usd'] = u
-                cur['count'] = 1
-                cur['ts_first'] = ts
-                cur['ts_last'] = ts
-                cur['sides'] = {side_val: 1}
-                continue
-            pm = np.mean(cur['prices'])
-            # pct distance
-            if abs(p - pm) / pm <= pct_merge:
-                cur['prices'].append(p)
-                cur['usd'] += u
-                cur['count'] += 1
-                cur['ts_last'] = max(cur['ts_last'], ts)
-                cur['sides'][side_val] = cur['sides'].get(side_val,0) + 1
-            else:
+        
+        # Use Numba-optimized clustering if available
+        if NUMBA_AVAILABLE and len(df) > 100:  # Worth it for larger datasets
+            # Prepare numpy arrays for numba
+            prices = df['price'].to_numpy(dtype=np.float64)
+            usd_values = df['usd_value'].fillna(0.0).to_numpy(dtype=np.float64)
+            timestamps_seconds = (df['timestamp'].astype(np.int64).to_numpy() / 1e9).astype(np.float64)
+            
+            # Encode sides: 0=unknown, 1=long, 2=short
+            side_map = {'long': 1, 'short': 2}
+            sides_encoded = df['side'].map(side_map).fillna(0).astype(np.int32).to_numpy()
+            
+            # Run numba clustering
+            (cluster_ids, cluster_means, cluster_mins, cluster_maxs, cluster_usds,
+             cluster_cnts, cluster_ts_firsts, cluster_ts_lasts, cluster_longs, cluster_shorts) = \
+                numba_optimized.cluster_prices_numba(prices, usd_values, timestamps_seconds, 
+                                                      sides_encoded, pct_merge)
+            
+            # Determine dominant side per cluster
+            dominant_sides = []
+            for i in range(len(cluster_means)):
+                if cluster_longs[i] > cluster_shorts[i]:
+                    dominant_sides.append('long')
+                elif cluster_shorts[i] > cluster_longs[i]:
+                    dominant_sides.append('short')
+                else:
+                    dominant_sides.append('unknown')
+            
+            # Compute strength using numba
+            current_time_sec = pd.Timestamp.utcnow().timestamp()
+            strengths = numba_optimized.compute_strength_batch(
+                cluster_usds, cluster_cnts, cluster_ts_lasts, current_time_sec
+            )
+            
+            # Build output DataFrame
+            zones_df = pd.DataFrame({
+                'price_mean': cluster_means,
+                'price_min': cluster_mins,
+                'price_max': cluster_maxs,
+                'total_usd': cluster_usds,
+                'count': cluster_cnts,
+                'first_ts': pd.to_datetime(cluster_ts_firsts, unit='s', utc=True),
+                'last_ts': pd.to_datetime(cluster_ts_lasts, unit='s', utc=True),
+                'dominant_side': dominant_sides,
+                'strength': strengths
+            }).sort_values('strength', ascending=False)
+        else:
+            # Fallback to original Python implementation
+            clusters = []
+            cur = {'prices': [], 'usd': 0.0, 'count': 0, 'ts_first': None, 'ts_last': None, 'sides': {}}
+            for _, row in df.iterrows():
+                p = float(row['price'])
+                u = float(row.get('usd_value') or 0.0)
+                ts = pd.to_datetime(row['timestamp'])
+                side_val = str(row['side']) if pd.notna(row['side']) else 'unknown'
+                if cur['count'] == 0:
+                    cur['prices'] = [p]
+                    cur['usd'] = u
+                    cur['count'] = 1
+                    cur['ts_first'] = ts
+                    cur['ts_last'] = ts
+                    cur['sides'] = {side_val: 1}
+                    continue
+                pm = np.mean(cur['prices'])
+                # pct distance
+                if abs(p - pm) / pm <= pct_merge:
+                    cur['prices'].append(p)
+                    cur['usd'] += u
+                    cur['count'] += 1
+                    cur['ts_last'] = max(cur['ts_last'], ts)
+                    cur['sides'][side_val] = cur['sides'].get(side_val,0) + 1
+                else:
+                    clusters.append(cur)
+                    cur = {'prices':[p], 'usd':u, 'count':1, 'ts_first':ts, 'ts_last':ts, 'sides':{side_val:1}}
+            if cur['count'] > 0:
                 clusters.append(cur)
-                cur = {'prices':[p], 'usd':u, 'count':1, 'ts_first':ts, 'ts_last':ts, 'sides':{side_val:1}}
-        if cur['count'] > 0:
-            clusters.append(cur)
-        # build DataFrame
-        out = []
-        for c in clusters:
-            prices = np.array(c['prices'], dtype=float)
-            price_mean = float(prices.mean())
-            price_min = float(prices.min())
-            price_max = float(prices.max())
-            total_usd = float(c['usd'])
-            count = int(c['count'])
-            first_ts = c['ts_first']
-            last_ts = c['ts_last']
-            sides = c['sides']
-            dominant_side = max(sides.items(), key=lambda x: x[1])[0] if sides else None
-            strength = self._compute_strength(total_usd, count, last_ts)
-            out_item = {'price_mean':price_mean,'price_min':price_min,'price_max':price_max,'total_usd':total_usd,'count':count,'first_ts':first_ts,'last_ts':last_ts,'dominant_side':dominant_side,'strength':strength}
-            out.append(out_item)
-        zones_df = pd.DataFrame(out).sort_values('strength', ascending=False)
+            # build DataFrame
+            out = []
+            for c in clusters:
+                prices = np.array(c['prices'], dtype=float)
+                price_mean = float(prices.mean())
+                price_min = float(prices.min())
+                price_max = float(prices.max())
+                total_usd = float(c['usd'])
+                count = int(c['count'])
+                first_ts = c['ts_first']
+                last_ts = c['ts_last']
+                sides = c['sides']
+                dominant_side = max(sides.items(), key=lambda x: x[1])[0] if sides else None
+                strength = self._compute_strength(total_usd, count, last_ts)
+                out_item = {'price_mean':price_mean,'price_min':price_min,'price_max':price_max,'total_usd':total_usd,'count':count,'first_ts':first_ts,'last_ts':last_ts,'dominant_side':dominant_side,'strength':strength}
+                out.append(out_item)
+            zones_df = pd.DataFrame(out).sort_values('strength', ascending=False)
 
         # compute volatility band (ATR) if requested and candles available
         if use_atr and self._candles is not None and not self._candles.empty and 'high' in self._candles.columns and 'low' in self._candles.columns and 'close' in self._candles.columns:
             try:
-                atr = self._compute_atr(self._candles)
-                # last atr value
-                last_atr = float(atr.iloc[-1]) if not atr.empty else 0.0
+                if NUMBA_AVAILABLE:
+                    # Use numba-optimized ATR
+                    high = self._candles['high'].to_numpy(dtype=np.float64)
+                    low = self._candles['low'].to_numpy(dtype=np.float64)
+                    close = self._candles['close'].to_numpy(dtype=np.float64)
+                    atr_array = numba_optimized.compute_atr_numba(high, low, close, per=14)
+                    last_atr = float(atr_array[-1]) if len(atr_array) > 0 else 0.0
+                else:
+                    atr = self._compute_atr(self._candles)
+                    last_atr = float(atr.iloc[-1]) if not atr.empty else 0.0
             except Exception:
                 last_atr = 0.0
         else:
             last_atr = 0.0
 
         # apply band: band = max(perc-based pad, atr*zone_vol_mult)
-        bands = []
-        for _, row in zones_df.iterrows():
-            pm = float(row['price_mean'])
-            # percent padding fallback (small)
-            pct_pad = max(0.001, pct_merge)
-            pad_by_pct = pm * pct_pad
-            pad_by_atr = last_atr * float(self.zone_vol_mult)
-            pad = max(pad_by_pct, pad_by_atr)
-            entry_low = pm - pad
-            entry_high = pm + pad
-            band_pct = pad / pm if pm else 0.0
-            bands.append({'atr': last_atr, 'band': pad, 'band_pct': band_pct, 'entry_low': entry_low, 'entry_high': entry_high})
-        if bands:
-            bands_df = pd.DataFrame(bands)
-            zones_df = pd.concat([zones_df.reset_index(drop=True), bands_df.reset_index(drop=True)], axis=1)
+        if NUMBA_AVAILABLE and not zones_df.empty:
+            # Use numba-optimized band computation
+            price_means = zones_df['price_mean'].to_numpy(dtype=np.float64)
+            band_widths, entry_lows, entry_highs, band_pcts = \
+                numba_optimized.compute_zone_bands(price_means, pct_merge, last_atr, self.zone_vol_mult)
+            
+            zones_df['atr'] = last_atr
+            zones_df['band'] = band_widths
+            zones_df['band_pct'] = band_pcts
+            zones_df['entry_low'] = entry_lows
+            zones_df['entry_high'] = entry_highs
+        else:
+            # Fallback to original implementation
+            bands = []
+            for _, row in zones_df.iterrows():
+                pm = float(row['price_mean'])
+                # percent padding fallback (small)
+                pct_pad = max(0.001, pct_merge)
+                pad_by_pct = pm * pct_pad
+                pad_by_atr = last_atr * float(self.zone_vol_mult)
+                pad = max(pad_by_pct, pad_by_atr)
+                entry_low = pm - pad
+                entry_high = pm + pad
+                band_pct = pad / pm if pm else 0.0
+                bands.append({'atr': last_atr, 'band': pad, 'band_pct': band_pct, 'entry_low': entry_low, 'entry_high': entry_high})
+            if bands:
+                bands_df = pd.DataFrame(bands)
+                zones_df = pd.concat([zones_df.reset_index(drop=True), bands_df.reset_index(drop=True)], axis=1)
         
         # Track zone width for regime detection
         if not zones_df.empty and 'band' in zones_df.columns:
