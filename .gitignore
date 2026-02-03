@@ -65,3 +65,6 @@ fix_numpy_compatibility.py
 dist/
 build/
 *.egg-info/
+
+# Project planning (private)
+PROJECT_STATUS.md
