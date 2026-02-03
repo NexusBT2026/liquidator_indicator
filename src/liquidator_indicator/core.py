@@ -237,9 +237,16 @@ class Liquidator:
         """Optional candle series used to compute volatility-adjusted bands."""
         self._candles = df.copy()
 
-    def compute_zones(self, window_minutes: Optional[int] = None, pct_merge: Optional[float] = None, use_atr: bool = True):
+    def compute_zones(self, window_minutes: Optional[int] = None, pct_merge: Optional[float] = None, use_atr: bool = True, min_quality: Optional[str] = None):
         """Cluster inferred liquidations by price into zones.
-        Returns DataFrame of zones: price_mean, price_min, price_max, total_usd, count, first_ts, last_ts, strength
+        
+        Args:
+            window_minutes: Time window for zone detection
+            pct_merge: Price merge threshold
+            use_atr: Use ATR for band calculation
+            min_quality: Filter zones by quality ('weak', 'medium', 'strong', or None for all)
+        
+        Returns DataFrame of zones: price_mean, price_min, price_max, total_usd, count, first_ts, last_ts, strength, quality_score, quality_label
         """
         if self._inferred_liqs.empty:
             return pd.DataFrame()
@@ -398,6 +405,21 @@ class Liquidator:
                 bands_df = pd.DataFrame(bands)
                 zones_df = pd.concat([zones_df.reset_index(drop=True), bands_df.reset_index(drop=True)], axis=1)
         
+        # Compute quality scores for each zone
+        if not zones_df.empty:
+            zones_df = self._add_quality_scores(zones_df)
+            
+            # Filter by min_quality if specified
+            if min_quality:
+                quality_filter = {
+                    'weak': 0,      # Include weak and above (all)
+                    'medium': 40,   # Include medium and above
+                    'strong': 70    # Include strong only
+                }
+                if min_quality.lower() in quality_filter:
+                    min_score = quality_filter[min_quality.lower()]
+                    zones_df = zones_df[zones_df['quality_score'] >= min_score].reset_index(drop=True)
+        
         # Track zone width for regime detection
         if not zones_df.empty and 'band' in zones_df.columns:
             avg_width = float(zones_df['band'].mean())
@@ -422,6 +444,62 @@ class Liquidator:
             recency_weight = 1.0
         score = (a * 0.6 + b * 0.4) * recency_weight
         return float(score)
+
+    def _add_quality_scores(self, zones_df: pd.DataFrame) -> pd.DataFrame:
+        """Add quality_score (0-100) and quality_label to zones DataFrame.
+        
+        Quality factors:
+        - Volume concentration (40%): Higher total_usd = stronger zone
+        - Recency (30%): More recent last_ts = more relevant
+        - Cluster density (20%): Higher count = more validated
+        - Price tightness (10%): Narrower spread (price_max - price_min) = stronger
+        """
+        if zones_df.empty:
+            return zones_df
+        
+        df = zones_df.copy()
+        
+        # Normalize each factor to 0-100 scale
+        # 1. Volume concentration (log scale)
+        max_usd = df['total_usd'].max()
+        if max_usd > 0:
+            volume_scores = 100 * np.log1p(df['total_usd']) / np.log1p(max_usd)
+        else:
+            volume_scores = pd.Series([0.0] * len(df))
+        
+        # 2. Recency (time decay with 6-hour half-life)
+        now = pd.Timestamp.utcnow()
+        ages_hours = (now - df['last_ts']).dt.total_seconds() / 3600.0
+        recency_scores = 100 * (1.0 / (1.0 + ages_hours / 6.0))  # Decay slower than strength
+        
+        # 3. Cluster density (log scale)
+        max_count = df['count'].max()
+        if max_count > 0:
+            density_scores = 100 * np.log1p(df['count']) / np.log1p(max_count)
+        else:
+            density_scores = pd.Series([0.0] * len(df))
+        
+        # 4. Price tightness (inverse of spread percentage)
+        spread_pct = (df['price_max'] - df['price_min']) / df['price_mean']
+        # Lower spread = higher score; normalize so 0.1% spread = 100, 1% spread = 50
+        tightness_scores = 100 * np.exp(-spread_pct * 10)
+        
+        # Weighted combination
+        df['quality_score'] = (
+            volume_scores * 0.40 +
+            recency_scores * 0.30 +
+            density_scores * 0.20 +
+            tightness_scores * 0.10
+        ).clip(0, 100).round(1)
+        
+        # Assign quality labels
+        df['quality_label'] = pd.cut(
+            df['quality_score'],
+            bins=[-np.inf, 40, 70, np.inf],
+            labels=['weak', 'medium', 'strong']
+        ).astype(str)
+        
+        return df
 
     def _compute_atr(self, candles: pd.DataFrame, per: int = 14) -> pd.Series:
         """Compute ATR series (Wilder) from candle DF with high/low/close columns."""

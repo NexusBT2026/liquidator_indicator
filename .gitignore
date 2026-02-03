@@ -55,11 +55,7 @@ ENV/
 Thumbs.db
 
 # Development / testing scripts (not part of package)
-test_backward_compatibility.py
-test_numba_performance.py
-benchmark_performance.py
-profile_code.py
-fix_numpy_compatibility.py
+tests/
 
 # Build artifacts
 dist/

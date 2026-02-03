@@ -3,4 +3,4 @@ from .core import Liquidator
 from .indicators import compute_vwap, compute_atr
 
 __all__ = ["Liquidator", "compute_vwap", "compute_atr"]
-__version__ = "0.0.2"
+__version__ = "0.0.7"
