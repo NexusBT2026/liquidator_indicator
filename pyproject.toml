@@ -1,6 +1,6 @@
 [project]
 name = "liquidator_indicator"
-version = "0.0.5"
+version = "0.0.6"
 description = "Lightweight liquidation zone indicator with multi-signal detection and visual chart integration"
 license = {text = "MIT"}
 requires-python = ">=3.9"
