@@ -25,12 +25,54 @@ Package detects liquidations from **4 patterns**:
 | Funding extremes | >0.1% funding (overleveraged) | 1.5x |
 | OI drops | >5% OI decrease (liquidations NOW) | 2.0x |
 
-### 3. DATA COLLECTORS ✅
+### 3. QUALITY SCORING (v0.0.7) ✅
+Automatic zone quality assessment:
+- **quality_score**: 0-100 numerical rating
+- **quality_label**: 'weak', 'medium', 'strong'
+- Filter zones: `compute_zones(min_quality='medium')`
+
+### 4. MULTI-TIMEFRAME ANALYSIS (v0.0.7) ✅
+Detect zones across 15 timeframes:
+- **Supported**: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
+- **alignment_score**: Cross-timeframe confirmation (0-100)
+- Select any combination for your strategy
+
+### 5. REAL-TIME STREAMING MODE (v0.0.7) ✅
+Incremental zone updates with event callbacks:
+- **Streaming mode**: Updates zones as trades arrive
+- **Event callbacks**: React to zone formation/updates/breaks
+- **Live trading ready**: Instant notifications
+
+### 6. INTERACTIVE VISUALIZATION (v0.0.7) ✅
+Plotly interactive charts with export:
+- **Interactive charts**: Zoom, pan, hover for detailed analysis
+- **HTML export**: Embed in dashboards or reports
+- **TradingView Pine Script**: Export zones for TradingView alerts
+- **Candlestick overlay**: Visualize zones with price action
+- **Quality color-coding**: Strong zones = green/red, medium = orange, weak = gray
+
+### 7. MULTI-EXCHANGE SUPPORT (v0.0.7) ✅
+Works with ANY major crypto exchange:
+- **23 supported exchanges**: Hyperliquid, Binance, Coinbase, Bybit, Kraken, OKX, HTX, Gate.io, MEXC, BitMEX, Deribit, Bitfinex, KuCoin, Phemex, Bitget, Crypto.com, BingX, Bitstamp, Gemini, Poloniex
+- **Automatic parsing**: REST API + WebSocket formats
+- **Symbol normalization**: Handles different exchange conventions (BTCUSDT, BTC-USD, XBT/USD)
+- **One-line usage**: `Liquidator.from_exchange('BTC', 'binance', raw_data=trades)`
+
+### 8. ML-POWERED PREDICTIONS (v0.0.7) ✅
+Machine learning predicts which zones will hold vs break:
+- **Prediction columns**: hold_probability, break_probability, prediction_confidence, ml_prediction
+- **10 engineered features**: volume, recency, density, tightness, quality, alignment, age, distance, touches, funding
+- **SQN metrics**: win_rate, avg_hold_time, expectancy, sqn_score (compatible with trading system quality assessment)
+- **Continuous learning**: Track real outcomes to improve predictions over time
+- **Optional**: Disabled by default (enable_ml=False), package works without scikit-learn
+
+### 9. DATA COLLECTORS ✅
 **Included in package**:
 - `FundingRateCollector` - Live funding rates + open interest from WebSocket
+- 21 exchange parsers - Automatic format conversion for 23 exchanges
 
 **You provide** (from any source):
-- Trade data (from public WebSocket feeds)
+- Trade data (from public WebSocket/REST API feeds from ANY exchange)
 
 ## Usage
 
@@ -89,6 +131,120 @@ zones = liq.compute_zones()
 
 # Stop collector
 collector.stop()
+```
+
+**Option 3: Quality Scoring (v0.0.7)**
+```python
+# Get only high-quality zones
+strong_zones = liq.compute_zones(min_quality='strong')
+medium_plus = liq.compute_zones(min_quality='medium')
+
+# Check quality scores
+print(zones[['price_mean', 'quality_score', 'quality_label']])
+```
+
+**Option 4: Multi-Timeframe Analysis (v0.0.7)**
+```python
+# Analyze across multiple timeframes
+scalping = liq.compute_multi_timeframe_zones(timeframes=['1m', '5m', '15m'])
+swing = liq.compute_multi_timeframe_zones(timeframes=['4h', '1d', '3d', '1w'])
+
+# All 15 timeframes (default)
+all_tf = liq.compute_multi_timeframe_zones()
+
+# High-alignment zones (multiple timeframes agree)
+premium = all_tf[all_tf['alignment_score'] >= 75]
+
+# Combine quality + multi-timeframe
+best_zones = liq.compute_multi_timeframe_zones(
+    timeframes=['1h', '4h', '1d'],
+    min_quality='strong'
+)
+best_zones = best_zones[best_zones['alignment_score'] >= 75]
+```
+
+**Option 5: Real-Time Streaming Mode (v0.0.7)**
+```python
+# Enable streaming mode for live trading
+L_stream = Liquidator('BTC', mode='streaming')
+
+# Register event callbacks
+def on_new_zone(zone):
+    print(f"🟢 New zone at ${zone['price_mean']:.2f}")
+    if zone['quality_label'] == 'strong':
+        send_alert(f"Strong zone formed at ${zone['price_mean']:.2f}")
+
+def on_zone_update(new_zone, old_zone):
+    volume_change = new_zone['total_usd'] - old_zone['total_usd']
+    print(f"🔵 Zone ${new_zone['price_mean']:.2f} updated: {volume_change:+,.0f}")
+
+def on_zone_break(zone):
+    print(f"🔴 Zone ${zone['price_mean']:.2f} broken")
+
+L_stream.on_zone_formed(on_new_zone)
+L_stream.on_zone_updated(on_zone_update)
+L_stream.on_zone_broken(on_zone_break)
+
+# Process trades incrementally (e.g., from WebSocket)
+for trade_batch in websocket_stream:
+    zones = L_stream.update_incremental(trade_batch)
+    # Callbacks automatically triggered!
+```
+
+**Option 6: Interactive Visualization (v0.0.7)**
+```python
+# Create interactive Plotly chart
+fig = liq.plot(zones, candles, title='BTC Liquidation Zones')
+fig.show()  # Opens in browser
+
+# Save to HTML for dashboards
+liq.plot(zones, candles, save_path='zones_chart.html', show=False)
+
+# Export to TradingView Pine Script
+fig = liq.plot(zones, export='tradingview')  # Prints Pine Script code
+
+# Customize chart appearance
+fig = liq.plot(
+    zones,
+    candles,
+    title='My Trading Zones',
+    template='plotly_dark',  # or 'plotly_white'
+    height=800,
+    show_volume=True
+)
+```
+
+**Option 7: Multi-Exchange Support (v0.0.7)**
+```python
+# Works with ANY exchange - automatic parser selection
+
+# Hyperliquid (your primary exchange)
+hyperliquid_data = fetch_hyperliquid_trades()  # Your data source
+L_hl = Liquidator.from_exchange('BTC', 'hyperliquid', raw_data=hyperliquid_data)
+
+# Binance
+binance_data = fetch_binance_aggTrades('BTCUSDT')
+L_bn = Liquidator.from_exchange('BTC', 'binance', raw_data=binance_data)
+
+# Coinbase
+coinbase_data = fetch_coinbase_matches('BTC-USD')
+L_cb = Liquidator.from_exchange('BTC', 'coinbase', raw_data=coinbase_data)
+
+# Bybit
+bybit_data = fetch_bybit_trades('BTCUSDT')
+L_by = Liquidator.from_exchange('BTC', 'bybit', raw_data=bybit_data)
+
+# All 23 exchanges supported!
+# Same API, works with any exchange
+zones = L_hl.compute_zones()
+
+# Multi-exchange arbitrage: compare zones across exchanges
+hl_zones = L_hl.compute_zones(min_quality='strong')
+bn_zones = L_bn.compute_zones(min_quality='strong')
+
+# Multi-timeframe visualization
+mtf_zones = liq.compute_multi_timeframe_zones(timeframes=['1h', '4h', '1d'])
+fig = liq.plot(mtf_zones, candles, title='Multi-Timeframe Zones')
 ```
 
 ## Data You Need

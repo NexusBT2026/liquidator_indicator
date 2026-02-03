@@ -245,6 +245,90 @@ When funding rate data is loaded (shown as "funding rows: XXX" in debug panel):
 
 ---
 
+## Multi-Exchange Support (v0.0.7)
+
+The indicator works with trade data from **ANY major crypto exchange**. Use the `from_exchange()` factory method for automatic format conversion.
+
+### Supported Exchanges (23)
+
+**Derivatives/Futures:**
+- Hyperliquid, Binance, Bybit, OKX, BitMEX, Deribit, Phemex
+
+**Spot:**
+- Coinbase, Kraken, Gate.io, KuCoin, Bitfinex, Gemini, Bitstamp
+
+**Multi-Asset:**
+- Crypto.com, BingX, Bitget, MEXC, HTX (Huobi), Poloniex
+
+### Usage Example
+
+```python
+from liquidator_indicator import Liquidator
+
+# Hyperliquid (your primary exchange)
+hl_trades = fetch_hyperliquid_trades()
+L_hl = Liquidator.from_exchange('BTC', 'hyperliquid', raw_data=hl_trades)
+
+# Binance
+bn_trades = fetch_binance_trades('BTCUSDT')
+L_bn = Liquidator.from_exchange('BTC', 'binance', raw_data=bn_trades)
+
+# Coinbase
+cb_trades = fetch_coinbase_trades('BTC-USD')
+L_cb = Liquidator.from_exchange('BTC', 'coinbase', raw_data=cb_trades)
+
+# Compute zones - same API for all exchanges!
+hl_zones = L_hl.compute_zones(min_quality='strong')
+bn_zones = L_bn.compute_zones(min_quality='strong')
+cb_zones = L_cb.compute_zones(min_quality='strong')
+```
+
+### Multi-Exchange Analysis
+
+**Use Case 1: Cross-Exchange Confirmation**
+```python
+# Find zones that appear on multiple exchanges
+def find_aligned_zones(zones_list, tolerance=0.005):
+    """Find zones within 0.5% price across exchanges."""
+    # Your implementation
+    pass
+
+aligned = find_aligned_zones([hl_zones, bn_zones, cb_zones])
+# Trade zones with multi-exchange confirmation
+```
+
+**Use Case 2: Arbitrage Detection**
+```python
+# Compare liquidation levels across exchanges
+hl_support = hl_zones[hl_zones['dominant_side'] == 'SHORT']['price_mean'].min()
+bn_support = bn_zones[bn_zones['dominant_side'] == 'SHORT']['price_mean'].min()
+
+if abs(hl_support - bn_support) / hl_support > 0.01:  # >1% difference
+    print(f"Liquidation level discrepancy: HL ${hl_support:.0f} vs BN ${bn_support:.0f}")
+    # Potential arbitrage opportunity
+```
+
+**Use Case 3: Exchange-Specific Patterns**
+```python
+# Some exchanges may have unique liquidation behavior
+# Compare zone quality scores across exchanges
+print(f"Hyperliquid avg quality: {hl_zones['quality_score'].mean():.1f}")
+print(f"Binance avg quality: {bn_zones['quality_score'].mean():.1f}")
+print(f"Coinbase avg quality: {cb_zones['quality_score'].mean():.1f}")
+```
+
+### Symbol Normalization
+
+The package automatically handles different symbol conventions:
+- Binance: `BTCUSDT`
+- Coinbase: `BTC-USD`
+- Kraken: `XBT/USD` (BTC → XBT)
+- Hyperliquid: `BTC`
+
+All normalized internally - you don't need to worry about formats!
+
+---
+
 ## Dashboard Integration
 
 ### Visual Elements

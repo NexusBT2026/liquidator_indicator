@@ -3,6 +3,8 @@
 ## What is it?
 The Liquidator Indicator identifies **liquidation clusters** from public trade data (no private node feeds needed). It shows where large liquidations occurred recently, which often become **support/resistance zones**.
 
+**New in v0.0.7:** Works with 23 major crypto exchanges (Hyperliquid, Binance, Coinbase, Bybit, Kraken, and more). Use `Liquidator.from_exchange()` for automatic format conversion.
+
 ## Visual Guide
 
 ### Zone Colors
