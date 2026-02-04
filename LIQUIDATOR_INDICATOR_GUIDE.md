@@ -249,7 +249,7 @@ When funding rate data is loaded (shown as "funding rows: XXX" in debug panel):
 
 The indicator works with trade data from **ANY major crypto exchange**. Use the `from_exchange()` factory method for automatic format conversion.
 
-### Supported Exchanges (23)
+### Supported Exchanges (21)
 
 **Derivatives/Futures:**
 - Hyperliquid, Binance, Bybit, OKX, BitMEX, Deribit, Phemex

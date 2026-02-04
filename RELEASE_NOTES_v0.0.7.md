@@ -77,7 +77,7 @@ L = Liquidator.from_exchange('BTC', 'coinbase', raw_data=coinbase_data)
 zones = L.compute_zones()  # Same API for all exchanges!
 ```
 
-**Supported Exchanges (23):**
+**Supported Exchanges (21):**
 - **Derivatives**: Hyperliquid, Binance, Bybit, OKX, BitMEX, Deribit, Phemex
 - **Spot**: Coinbase, Kraken, Gate.io, KuCoin, Bitfinex, Gemini, Bitstamp
 - **Multi-Asset**: Crypto.com, BingX, Bitget, MEXC, HTX (Huobi), Poloniex

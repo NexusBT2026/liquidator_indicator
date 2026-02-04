@@ -53,7 +53,7 @@ Plotly interactive charts with export:
 
 ### 7. MULTI-EXCHANGE SUPPORT (v0.0.7) ✅
 Works with ANY major crypto exchange:
-- **23 supported exchanges**: Hyperliquid, Binance, Coinbase, Bybit, Kraken, OKX, HTX, Gate.io, MEXC, BitMEX, Deribit, Bitfinex, KuCoin, Phemex, Bitget, Crypto.com, BingX, Bitstamp, Gemini, Poloniex
+- **21 supported exchanges**: Hyperliquid, Binance, Coinbase, Bybit, Kraken, OKX, HTX, Gate.io, MEXC, BitMEX, Deribit, Bitfinex, KuCoin, Phemex, Bitget, Crypto.com, BingX, Bitstamp, Gemini, Poloniex
 - **Automatic parsing**: REST API + WebSocket formats
 - **Symbol normalization**: Handles different exchange conventions (BTCUSDT, BTC-USD, XBT/USD)
 - **One-line usage**: `Liquidator.from_exchange('BTC', 'binance', raw_data=trades)`
@@ -69,7 +69,7 @@ Machine learning predicts which zones will hold vs break:
 ### 9. DATA COLLECTORS ✅
 **Included in package**:
 - `FundingRateCollector` - Live funding rates + open interest from WebSocket
-- 21 exchange parsers - Automatic format conversion for 23 exchanges
+- 21 exchange parsers - Automatic format conversion for 21 exchanges
 
 **You provide** (from any source):
 - Trade data (from public WebSocket/REST API feeds from ANY exchange)
@@ -234,7 +234,7 @@ L_cb = Liquidator.from_exchange('BTC', 'coinbase', raw_data=coinbase_data)
 bybit_data = fetch_bybit_trades('BTCUSDT')
 L_by = Liquidator.from_exchange('BTC', 'bybit', raw_data=bybit_data)
 
-# All 23 exchanges supported!
+# All 21 exchanges supported!
 # Same API, works with any exchange
 zones = L_hl.compute_zones()
 
