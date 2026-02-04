@@ -7,7 +7,7 @@ Instead of relying on private liquidation event streams, this package analyzes *
 ## Features
 
 - **100% Public Data**: Works with standard market feeds anyone can access
-- **Multi-Exchange Support** (v0.0.7): Native parsers for 23 exchanges - works with ANY major exchange!
+- **Multi-Exchange Support** (v0.0.7): Native parsers for 21 exchanges - works with ANY major exchange!
   - Hyperliquid, Binance, Coinbase, Bybit, Kraken, OKX, HTX, Gate.io, MEXC, and more
   - Automatic symbol normalization and format conversion
   - REST API + WebSocket support per exchange
@@ -443,6 +443,10 @@ Contributing & publishing
 
 - Add tests for new features and open a PR. Follow the existing CI and linting rules.
 - When ready to publish, build a wheel from `pyproject.toml` and upload with `twine` to your chosen registry.
+
+## Contributors
+
+Special thanks to [@arosstale](https://github.com/arosstale) for future project ideas and production verification testing. See [CONTRIBUTORS.md](CONTRIBUTORS.md) for full details.
 
 Next steps I can take
 ---------------------
