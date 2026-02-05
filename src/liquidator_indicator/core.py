@@ -182,8 +182,10 @@ class Liquidator:
             try:
                 trades = parser.parse_trades(raw_data)
                 liquidator.ingest_trades(trades)
+            except (ValueError, KeyError, TypeError) as e:
+                raise ValueError(f"Failed to parse {exchange} data: {str(e)}") from e
             except Exception as e:
-                raise ValueError(f"Failed to parse {exchange} data: {str(e)}")
+                raise ValueError(f"Unexpected error parsing {exchange} data: {str(e)}") from e
         
         return liquidator
 
@@ -210,7 +212,8 @@ class Liquidator:
         if 'time' in df.columns:
             try:
                 df['timestamp'] = pd.to_datetime(df['time'], unit='ms', errors='coerce', utc=True)
-            except Exception:
+            except (ValueError, TypeError, OverflowError):
+                # Fallback: try parsing without unit if ms conversion fails
                 df['timestamp'] = pd.to_datetime(df['time'], errors='coerce', utc=True)
         elif 'timestamp' in df.columns:
             df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce', utc=True)
@@ -289,7 +292,8 @@ class Liquidator:
                         funding_liqs = df.copy()
                         funding_liqs['usd_value'] = funding_liqs['usd_value'] * 1.5
                         funding_liqs = funding_liqs.head(int(len(funding_liqs) * 0.3))  # Top 30% by recency
-            except Exception:
+            except (KeyError, ValueError, IndexError):
+                # Funding data format issue - skip funding pattern
                 pass
         
         # Pattern 4: Open interest drops (NEW)
@@ -308,7 +312,8 @@ class Liquidator:
                         recent_window = pd.Timestamp.now(tz='UTC') - pd.Timedelta(minutes=5)
                         oi_liqs = df[df['timestamp'] > recent_window].copy()
                         oi_liqs['usd_value'] = oi_liqs['usd_value'] * 2.0
-            except Exception:
+            except (KeyError, ValueError, IndexError, ZeroDivisionError):
+                # OI data format issue or division by zero - skip OI pattern
                 pass
         
         # Combine all patterns
@@ -418,9 +423,9 @@ class Liquidator:
             sides_encoded = df['side'].map(side_map).fillna(0).astype(np.int32).to_numpy()
             
             # Run numba clustering
-            (cluster_ids, cluster_means, cluster_mins, cluster_maxs, cluster_usds,
+            (_cluster_ids, cluster_means, cluster_mins, cluster_maxs, cluster_usds,
              cluster_cnts, cluster_ts_firsts, cluster_ts_lasts, cluster_longs, cluster_shorts) = \
-                numba_optimized.cluster_prices_numba(prices, usd_values, timestamps_seconds, 
+                numba_optimized.cluster_prices_numba(prices, usd_values, timestamps_seconds,
                                                       sides_encoded, pct_merge)
             
             # Determine dominant side per cluster
@@ -512,7 +517,8 @@ class Liquidator:
                 else:
                     atr = self._compute_atr(self._candles)
                     last_atr = float(atr.iloc[-1]) if not atr.empty else 0.0
-            except Exception:
+            except (ValueError, KeyError, IndexError):
+                # ATR calculation failed - use 0.0 as fallback
                 last_atr = 0.0
         else:
             last_atr = 0.0
@@ -620,7 +626,7 @@ class Liquidator:
         
         # Calculate alignment scores (how many timeframes have zones near each price)
         alignment_scores = []
-        for idx, zone in combined.iterrows():
+        for _idx, zone in combined.iterrows():
             price = zone['price_mean']
             tolerance = price * 0.005  # 0.5% tolerance for "nearby" zones
             
@@ -660,7 +666,8 @@ class Liquidator:
                 age_sec = (pd.Timestamp.utcnow() - pd.to_datetime(last_ts)).total_seconds()
                 # recent events score higher — decay with half-life of 1 hour
                 recency_weight = 1.0 / (1.0 + (age_sec / 3600.0))
-        except Exception:
+        except (TypeError, AttributeError, OverflowError):
+            # Timestamp conversion or calculation failed - use default weight
             recency_weight = 1.0
         score = (a * 0.6 + b * 0.4) * recency_weight
         return float(score)
@@ -843,8 +850,12 @@ class Liquidator:
         for callback in self._callbacks[event_type]:
             try:
                 callback(*args)
-            except Exception as e:
+            except (TypeError, ValueError, AttributeError) as e:
+                # Callback execution failed - log and continue with other callbacks
                 print(f"Callback error ({event_type}): {e}")
+            except Exception as e:
+                # Unexpected error - log but don't crash
+                print(f"Unexpected callback error ({event_type}): {e}")
 
     def get_nearest_zone(self, price: float, zones_df: Optional[pd.DataFrame] = None):
         """Return nearest zone row (as dict) to `price` or None."""
@@ -873,7 +884,6 @@ class Liquidator:
         """
         try:
             import plotly.graph_objects as go
-            from plotly.subplots import make_subplots
         except ImportError:
             print("Error: plotly not installed. Run: pip install plotly")
             return None
@@ -902,7 +912,7 @@ class Liquidator:
             ))
         
         # Add zones as rectangles
-        for idx, zone in zones.iterrows():
+        for _idx, zone in zones.iterrows():
             # Color by quality
             if zone['quality_label'] == 'strong':
                 color = 'rgba(76, 175, 80, 0.3)' if zone['dominant_side'] == 'long' else 'rgba(244, 67, 54, 0.3)'
@@ -1167,7 +1177,7 @@ class Liquidator:
         if self._last_zones.empty:
             return
         
-        for idx, zone in self._last_zones.iterrows():
+        for _idx, zone in self._last_zones.iterrows():
             zone_id = f"{zone['price_mean']:.0f}"
             price_mean = zone['price_mean']
             
