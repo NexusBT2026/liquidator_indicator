@@ -37,7 +37,6 @@ class ZonePredictor:
     
     def __init__(self):
         self.model = LogisticRegression(
-            penalty='l2',
             C=1.0,
             solver='lbfgs',
             max_iter=1000,

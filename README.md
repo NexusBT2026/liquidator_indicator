@@ -11,6 +11,11 @@ Instead of relying on private liquidation event streams, this package analyzes *
   - Hyperliquid, Binance, Coinbase, Bybit, Kraken, OKX, HTX, Gate.io, MEXC, and more
   - Automatic symbol normalization and format conversion
   - REST API + WebSocket support per exchange
+- **Real Liquidation Data Validation** (v0.0.8): Cross-validate with actual exchange liquidation feeds
+  - Collectors for Binance, Bybit, OKX, BitMEX, Deribit
+  - Quality score boosting (up to +30%) for zones matching real liquidations
+  - Cross-exchange cascade detection (multiple exchanges liquidating at same price)
+  - Inference accuracy validation (compare inferred vs real)
 - **ML-Powered Predictions** (v0.0.7): Machine learning for zone hold/break probability
   - 10 engineered features from zone characteristics
   - SQN-compatible performance metrics (win_rate, expectancy, sqn_score)
@@ -69,7 +74,45 @@ zones = L.compute_zones()
 print(f"Detected {len(zones)} liquidation zones")
 ```
 
-### Option 2: Manual Trade Ingestion
+### Option 2: Real Liquidation Data (NEW v0.0.8)
+
+```python
+from liquidator_indicator import Liquidator
+from liquidator_indicator.collectors import MultiExchangeLiquidationCollector
+
+# Collect REAL liquidation events from multiple exchanges
+collector = MultiExchangeLiquidationCollector(
+    exchanges=['binance', 'bybit', 'okx', 'bitmex', 'deribit'],
+    symbols=['BTC', 'ETH']
+)
+collector.start()
+
+# Collect for 60 seconds (or run continuously in background)
+import time
+time.sleep(60)
+
+# Get real liquidation data
+real_liqs = collector.get_liquidations()
+print(f"Collected {len(real_liqs)} real liquidations")
+
+# Create indicator and validate with real data
+liq = Liquidator('BTC')
+liq.ingest_trades(your_trade_data)  # Inferred liquidations
+liq.ingest_liquidations(real_liqs)  # Real liquidations for validation
+
+# Compute zones (quality scores boosted by real data!)
+zones = liq.compute_zones()
+
+# Zones matching real liquidations get +10-30% quality boost
+validated_zones = zones[zones['real_liq_count'] > 0]
+print(f"{len(validated_zones)} zones validated with real liquidations")
+
+collector.stop()
+```
+
+See [examples/multi_exchange_liquidations.py](examples/multi_exchange_liquidations.py) for full demo.
+
+### Option 3: Manual Trade Ingestion
 
 ```python
 from liquidator_indicator.core import Liquidator

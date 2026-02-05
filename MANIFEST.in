@@ -1,0 +1,52 @@
+# Include essential documentation
+include README.md
+include LICENSE
+include CHANGELOG.md
+include QUICK_START.md
+include SECURITY.md
+
+# Include user guides
+include LIQUIDATOR_INDICATOR_GUIDE.md
+include LIQUIDATOR_TRADING_GUIDE.md
+include LIQUIDATOR_VISUAL_GUIDE.md
+include LIQUIDATION_COLLECTORS_GUIDE.md
+
+# Include compatibility and contributor info
+include COMPATIBILITY.md
+include CONTRIBUTORS.md
+
+# Include example scripts
+recursive-include examples *.py
+
+# Exclude all test files and debug scripts
+exclude test_*.py
+exclude debug_*.py
+exclude gftest
+recursive-exclude tests *
+recursive-exclude gftest *
+
+# Exclude build artifacts
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude *.so
+global-exclude .DS_Store
+
+# Exclude generated files
+exclude *.html
+exclude *.png
+exclude requirements-lock.txt
+
+# Exclude project planning documents
+exclude PROJECT_STATUS.md
+exclude TESTING_STATUS.md
+exclude RELEASE_NOTES_*.md
+exclude NUMBA_OPTIMIZATIONS.md
+exclude LIQUIDATION_COLLECTORS_EXPANSION.md
+exclude VERIFICATION_BADGE.txt
+
+# Exclude IDE and editor files
+global-exclude .vscode
+global-exclude .idea
+global-exclude *.swp
+global-exclude *.swo
+global-exclude *~

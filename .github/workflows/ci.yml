@@ -1,0 +1,146 @@
+name: Lint and Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lint:
+    name: Code Quality (PyLint)
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pylint
+        pip install -e .
+    
+    - name: Run PyLint
+      run: |
+        pylint src/liquidator_indicator --disable=C,R --fail-under=9.5
+      continue-on-error: false
+
+  test:
+    name: Test Suite
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .
+        pip install pytest pytest-timeout pytest-cov
+    
+    - name: Run tests
+      run: |
+        pytest tests/ -v -m "not live" --cov=src/liquidator_indicator --cov-report=xml --cov-report=term
+    
+    - name: Upload coverage to Codecov
+      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./coverage.xml
+        fail_ci_if_error: false
+
+  test-numba:
+    name: Test with Numba Optimization
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    
+    - name: Install dependencies with numba
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .
+        pip install numba pytest pytest-timeout
+    
+    - name: Run tests with numba
+      run: |
+        pytest tests/ -v -m "not live" -k "not test_numba_unavailable"
+
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install safety bandit
+        pip install -e .
+    
+    - name: Run safety check (dependency vulnerabilities)
+      run: |
+        safety check --ignore=70612
+      continue-on-error: true
+    
+    - name: Run bandit (code security)
+      run: |
+        bandit -r src/liquidator_indicator -ll
+      continue-on-error: true
+
+  build:
+    name: Build Distribution
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    
+    - name: Install build tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install build twine
+    
+    - name: Build package
+      run: |
+        python -m build
+    
+    - name: Check package
+      run: |
+        twine check dist/*
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: dist
+        path: dist/

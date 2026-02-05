@@ -62,6 +62,7 @@ class Liquidator:
         self._trades = pd.DataFrame()
         self._inferred_liqs = pd.DataFrame()
         self._funding_data = pd.DataFrame()  # NEW: funding rates + open interest
+        self._real_liquidations = pd.DataFrame()  # NEW: Real liquidation data from exchanges
         self._candles = None
         self._zone_history = []  # track zone width over time for expansion/contraction
         # configuration
@@ -183,7 +184,7 @@ class Liquidator:
                 trades = parser.parse_trades(raw_data)
                 liquidator.ingest_trades(trades)
             except Exception as e:
-                raise ValueError(f"Failed to parse {exchange} data: {str(e)}")
+                raise ValueError(f"Failed to parse {exchange} data: {str(e)}") from e
         
         return liquidator
 
@@ -210,7 +211,8 @@ class Liquidator:
         if 'time' in df.columns:
             try:
                 df['timestamp'] = pd.to_datetime(df['time'], unit='ms', errors='coerce', utc=True)
-            except Exception:
+            except (ValueError, TypeError):
+                # Fallback: timestamp may not be in milliseconds
                 df['timestamp'] = pd.to_datetime(df['time'], errors='coerce', utc=True)
         elif 'timestamp' in df.columns:
             df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce', utc=True)
@@ -228,14 +230,19 @@ class Liquidator:
         if 'sz' in df.columns:
             df['size'] = pd.to_numeric(df['sz'], errors='coerce')
         elif 'size' not in df.columns:
-            df['size'] = pd.to_numeric(df.iloc[:,3], errors='coerce')
+            # Backward compatibility: infer size from usd_value if available
+            if 'usd_value' in df.columns:
+                df['size'] = pd.to_numeric(df['usd_value'], errors='coerce') / df['price']
+            else:
+                df['size'] = pd.to_numeric(df.iloc[:,3], errors='coerce')
         else:
             df['size'] = pd.to_numeric(df['size'], errors='coerce')
         
         # normalize side
         if 'side' in df.columns:
             df['side'] = df['side'].astype(str).str.upper()
-        df['coin'] = df.get('coin', self.coin)
+        if 'coin' not in df.columns:
+            df['coin'] = self.coin
         df['usd_value'] = df['price'] * df['size']
         
         df = df[['timestamp','side','coin','price','size','usd_value']]
@@ -289,7 +296,8 @@ class Liquidator:
                         funding_liqs = df.copy()
                         funding_liqs['usd_value'] = funding_liqs['usd_value'] * 1.5
                         funding_liqs = funding_liqs.head(int(len(funding_liqs) * 0.3))  # Top 30% by recency
-            except Exception:
+            except (KeyError, IndexError, TypeError):
+                # Funding data unavailable or malformed - skip pattern
                 pass
         
         # Pattern 4: Open interest drops (NEW)
@@ -308,7 +316,8 @@ class Liquidator:
                         recent_window = pd.Timestamp.now(tz='UTC') - pd.Timedelta(minutes=5)
                         oi_liqs = df[df['timestamp'] > recent_window].copy()
                         oi_liqs['usd_value'] = oi_liqs['usd_value'] * 2.0
-            except Exception:
+            except (KeyError, IndexError, TypeError):
+                # OI data unavailable or malformed - skip pattern
                 pass
         
         # Combine all patterns
@@ -371,6 +380,75 @@ class Liquidator:
             combined = pd.concat([self._funding_data, df], ignore_index=True)
             self._funding_data = combined.sort_values('timestamp').groupby('symbol').tail(1).reset_index(drop=True)
     
+    def ingest_liquidations(self, data):
+        """Ingest REAL liquidation data from exchanges.
+        
+        This is different from ingest_trades - it accepts actual liquidation events
+        from exchanges that provide liquidation feeds (Binance, Bybit, OKX, etc.).
+        
+        Used to:
+        1. Cross-validate the inference algorithm (compare inferred vs real liquidations)
+        2. Boost quality scores for zones that match real liquidations
+        3. Detect cross-exchange liquidation cascades
+        
+        Args:
+            data: DataFrame with columns [exchange, symbol, side, price, quantity, value_usd, timestamp]
+                  Or output from MultiExchangeLiquidationCollector.get_liquidations()
+        
+        Example:
+            from liquidator_indicator.collectors import MultiExchangeLiquidationCollector
+            
+            collector = MultiExchangeLiquidationCollector(
+                exchanges=['binance', 'bybit', 'okx'],
+                symbols=['BTC', 'ETH']
+            )
+            collector.start()
+            
+            # Get liquidations
+            liqs = collector.get_liquidations()
+            
+            # Feed to indicator
+            liq_indicator = Liquidator()
+            liq_indicator.ingest_liquidations(liqs)
+            zones = liq_indicator.compute_zones()  # Quality scores boosted by real data
+        """
+        if data is None or (isinstance(data, pd.DataFrame) and data.empty):
+            return
+        
+        df = data.copy() if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
+        
+        if df.empty:
+            return
+        
+        # Normalize required columns
+        required_cols = ['exchange', 'symbol', 'side', 'price', 'quantity', 'value_usd', 'timestamp']
+        missing = [col for col in required_cols if col not in df.columns]
+        if missing:
+            raise ValueError(f"Missing required columns: {missing}")
+        
+        # Normalize timestamp
+        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce')
+        
+        # Ensure numeric columns
+        for col in ['price', 'quantity', 'value_usd']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Merge with existing liquidation data
+        if self._real_liquidations.empty:
+            self._real_liquidations = df
+        else:
+            combined = pd.concat([self._real_liquidations, df], ignore_index=True)
+            # Remove duplicates based on exchange, price, timestamp
+            combined = combined.drop_duplicates(subset=['exchange', 'price', 'timestamp'], keep='last')
+            combined = combined.sort_values('timestamp').reset_index(drop=True)
+            
+            # Keep only recent liquidations (cutoff_hours)
+            if self.cutoff_hours is not None:
+                cutoff = datetime.now(timezone.utc) - pd.Timedelta(hours=self.cutoff_hours)
+                combined = combined[combined['timestamp'] >= cutoff]
+            
+            self._real_liquidations = combined
+
     def ingest_liqs(self, data):
         """Legacy method for backward compatibility. Redirects to ingest_trades."""
         self.ingest_trades(data)
@@ -396,7 +474,7 @@ class Liquidator:
         window_minutes = int(window_minutes) if window_minutes is not None else int(self.window_minutes)
         pct_merge = float(pct_merge) if pct_merge is not None else float(self.pct_merge)
         # limit to recent window
-        now = pd.Timestamp.utcnow()
+        now = pd.Timestamp.now('UTC')
         window_start = now - pd.Timedelta(minutes=window_minutes)
         df = self._inferred_liqs[self._inferred_liqs['timestamp'] >= window_start].copy()
         # If filtering by recent window returns nothing (e.g., test data with static timestamps),
@@ -434,7 +512,7 @@ class Liquidator:
                     dominant_sides.append('unknown')
             
             # Compute strength using numba
-            current_time_sec = pd.Timestamp.utcnow().timestamp()
+            current_time_sec = pd.Timestamp.now('UTC').timestamp()
             strengths = numba_optimized.compute_strength_batch(
                 cluster_usds, cluster_cnts, cluster_ts_lasts, current_time_sec
             )
@@ -512,7 +590,8 @@ class Liquidator:
                 else:
                     atr = self._compute_atr(self._candles)
                     last_atr = float(atr.iloc[-1]) if not atr.empty else 0.0
-            except Exception:
+            except (KeyError, IndexError, ValueError, TypeError):
+                # Candle data unavailable or malformed - fallback to 0
                 last_atr = 0.0
         else:
             last_atr = 0.0
@@ -551,6 +630,10 @@ class Liquidator:
         if not zones_df.empty:
             zones_df = self._add_quality_scores(zones_df)
             
+            # Boost quality scores using real liquidation data (if available)
+            if not self._real_liquidations.empty:
+                zones_df = self._validate_with_real_liquidations(zones_df)
+            
             # Filter by min_quality if specified
             if min_quality:
                 quality_filter = {
@@ -566,7 +649,7 @@ class Liquidator:
         # Track zone width for regime detection
         if not zones_df.empty and 'band' in zones_df.columns:
             avg_width = float(zones_df['band'].mean())
-            self._zone_history.append({'timestamp': pd.Timestamp.utcnow(), 'avg_width': avg_width})
+            self._zone_history.append({'timestamp': pd.Timestamp.now('UTC'), 'avg_width': avg_width})
             # Keep last 20 measurements
             if len(self._zone_history) > 20:
                 self._zone_history = self._zone_history[-20:]
@@ -620,7 +703,7 @@ class Liquidator:
         
         # Calculate alignment scores (how many timeframes have zones near each price)
         alignment_scores = []
-        for idx, zone in combined.iterrows():
+        for _idx, zone in combined.iterrows():
             price = zone['price_mean']
             tolerance = price * 0.005  # 0.5% tolerance for "nearby" zones
             
@@ -657,10 +740,11 @@ class Liquidator:
         recency_weight = 1.0
         try:
             if last_ts is not None:
-                age_sec = (pd.Timestamp.utcnow() - pd.to_datetime(last_ts)).total_seconds()
+                age_sec = (pd.Timestamp.now('UTC') - pd.to_datetime(last_ts)).total_seconds()
                 # recent events score higher — decay with half-life of 1 hour
                 recency_weight = 1.0 / (1.0 + (age_sec / 3600.0))
-        except Exception:
+        except (ValueError, TypeError, AttributeError):
+            # Timestamp parsing error - use default weight
             recency_weight = 1.0
         score = (a * 0.6 + b * 0.4) * recency_weight
         return float(score)
@@ -688,7 +772,7 @@ class Liquidator:
             volume_scores = pd.Series([0.0] * len(df))
         
         # 2. Recency (time decay with 6-hour half-life)
-        now = pd.Timestamp.utcnow()
+        now = pd.Timestamp.now('UTC')
         ages_hours = (now - df['last_ts']).apply(lambda x: x.total_seconds()) / 3600.0
         recency_scores = 100 * (1.0 / (1.0 + ages_hours / 6.0))  # Decay slower than strength
         
@@ -713,6 +797,94 @@ class Liquidator:
         ).clip(0, 100).round(1)
         
         # Assign quality labels
+        df['quality_label'] = pd.cut(
+            df['quality_score'],
+            bins=[-np.inf, 40, 70, np.inf],
+            labels=['weak', 'medium', 'strong']
+        ).astype(str)
+        
+        return df
+    
+    def _validate_with_real_liquidations(self, zones_df: pd.DataFrame) -> pd.DataFrame:
+        """Cross-validate zones with real liquidation data and boost quality scores.
+        
+        Boosts quality scores for zones that:
+        1. Match real liquidations within tolerance (price proximity)
+        2. Have multiple exchanges reporting liquidations at same price (cascade)
+        3. Align with high-value liquidations
+        
+        Adds columns:
+        - real_liq_count: Number of real liquidations matching this zone
+        - real_liq_exchanges: Number of exchanges with liquidations in this zone
+        - real_liq_value_usd: Total USD value of real liquidations in zone
+        - validation_boost: Percentage boost to quality_score (0-30%)
+        """
+        if zones_df.empty or self._real_liquidations.empty:
+            return zones_df
+        
+        df = zones_df.copy()
+        liqs = self._real_liquidations.copy()
+        
+        # For each zone, count matching liquidations within entry band
+        validation_results = []
+        
+        for _idx, zone in df.iterrows():
+            entry_low = zone.get('entry_low', zone['price_mean'] * 0.997)
+            entry_high = zone.get('entry_high', zone['price_mean'] * 1.003)
+            
+            # Find liquidations within zone boundaries
+            matching_liqs = liqs[
+                (liqs['price'] >= entry_low) & 
+                (liqs['price'] <= entry_high)
+            ]
+            
+            if matching_liqs.empty:
+                validation_results.append({
+                    'real_liq_count': 0,
+                    'real_liq_exchanges': 0,
+                    'real_liq_value_usd': 0.0,
+                    'validation_boost': 0.0
+                })
+                continue
+            
+            # Count exchanges (cascade detection)
+            unique_exchanges = matching_liqs['exchange'].nunique()
+            
+            # Sum liquidation value
+            total_value = matching_liqs['value_usd'].sum()
+            
+            # Calculate validation boost (0-30% max)
+            # - Base: 10% for any match
+            # - Cascade bonus: +5% per additional exchange (max 15%)
+            # - Volume bonus: +5% if liquidation value > zone value
+            boost = 10.0
+            
+            if unique_exchanges > 1:
+                cascade_bonus = min(15.0, (unique_exchanges - 1) * 5.0)
+                boost += cascade_bonus
+            
+            if total_value > zone['total_usd']:
+                boost += 5.0
+            
+            validation_results.append({
+                'real_liq_count': len(matching_liqs),
+                'real_liq_exchanges': unique_exchanges,
+                'real_liq_value_usd': total_value,
+                'validation_boost': boost
+            })
+        
+        # Add validation columns
+        validation_df = pd.DataFrame(validation_results)
+        for col in validation_df.columns:
+            df[col] = validation_df[col]
+        
+        # Apply boost to quality_score
+        df['quality_score_original'] = df['quality_score']
+        df['quality_score'] = (
+            df['quality_score'] * (1.0 + df['validation_boost'] / 100.0)
+        ).clip(0, 100).round(1)
+        
+        # Update quality_label based on new score
         df['quality_label'] = pd.cut(
             df['quality_score'],
             bins=[-np.inf, 40, 70, np.inf],
@@ -843,7 +1015,8 @@ class Liquidator:
         for callback in self._callbacks[event_type]:
             try:
                 callback(*args)
-            except Exception as e:
+            except (TypeError, ValueError, KeyError, AttributeError) as e:
+                # Callback execution error - log and continue
                 print(f"Callback error ({event_type}): {e}")
 
     def get_nearest_zone(self, price: float, zones_df: Optional[pd.DataFrame] = None):
@@ -873,7 +1046,6 @@ class Liquidator:
         """
         try:
             import plotly.graph_objects as go
-            from plotly.subplots import make_subplots
         except ImportError:
             print("Error: plotly not installed. Run: pip install plotly")
             return None
@@ -902,7 +1074,7 @@ class Liquidator:
             ))
         
         # Add zones as rectangles
-        for idx, zone in zones.iterrows():
+        for _idx, zone in zones.iterrows():
             # Color by quality
             if zone['quality_label'] == 'strong':
                 color = 'rgba(76, 175, 80, 0.3)' if zone['dominant_side'] == 'long' else 'rgba(244, 67, 54, 0.3)'
@@ -1167,7 +1339,7 @@ class Liquidator:
         if self._last_zones.empty:
             return
         
-        for idx, zone in self._last_zones.iterrows():
+        for _idx, zone in self._last_zones.iterrows():
             zone_id = f"{zone['price_mean']:.0f}"
             price_mean = zone['price_mean']
             
