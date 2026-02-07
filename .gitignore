@@ -55,7 +55,7 @@ ENV/
 Thumbs.db
 
 # Development / testing scripts (not part of package)
-tests/
+tests/test_build
 
 # Build artifacts
 dist/
