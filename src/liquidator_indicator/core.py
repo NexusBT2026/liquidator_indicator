@@ -4,7 +4,7 @@ Instead of using private liquidation feeds, this analyzes PUBLIC TRADE DATA to d
 liquidation-like patterns and cluster them into zones. Works with data anyone can collect
 from public websocket feeds.
 """
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import pandas as pd
 import numpy as np
 import math
@@ -61,6 +61,7 @@ class Liquidator:
         self.coin = coin
         self._trades = pd.DataFrame()
         self._inferred_liqs = pd.DataFrame()
+        self._real_liquidations = pd.DataFrame()  # Real liquidation data from collectors
         self._funding_data = pd.DataFrame()  # NEW: funding rates + open interest
         self._candles = None
         self._zone_history = []  # track zone width over time for expansion/contraction
@@ -88,7 +89,7 @@ class Liquidator:
         self._zone_touch_counts = {}  # Track how many times price touched each zone
 
     @classmethod
-    def from_exchange(cls, symbol: str, exchange: str, raw_data: any = None, **kwargs):
+    def from_exchange(cls, symbol: str, exchange: str, raw_data: Optional[Any] = None, **kwargs):
         """
         Create Liquidator instance with exchange-specific parser.
         
@@ -228,7 +229,11 @@ class Liquidator:
         else:
             df['price'] = pd.to_numeric(df['price'], errors='coerce')
             
-        if 'sz' in df.columns:
+        # Handle old format: usd_value column but no size column (backwards compatibility)
+        if 'usd_value' in df.columns and 'size' not in df.columns and 'sz' not in df.columns:
+            df['usd_value'] = pd.to_numeric(df['usd_value'], errors='coerce')
+            df['size'] = df['usd_value'] / df['price']  # Calculate size from usd_value
+        elif 'sz' in df.columns:
             df['size'] = pd.to_numeric(df['sz'], errors='coerce')
         elif 'size' not in df.columns:
             df['size'] = pd.to_numeric(df.iloc[:,3], errors='coerce')
@@ -239,7 +244,10 @@ class Liquidator:
         if 'side' in df.columns:
             df['side'] = df['side'].astype(str).str.upper()
         df['coin'] = df.get('coin', self.coin)
-        df['usd_value'] = df['price'] * df['size']
+        
+        # Calculate usd_value if not present
+        if 'usd_value' not in df.columns:
+            df['usd_value'] = df['price'] * df['size']
         
         df = df[['timestamp','side','coin','price','size','usd_value']]
         df = df.dropna(subset=['timestamp','price','size'])
@@ -258,6 +266,56 @@ class Liquidator:
         
         # infer liquidations from trade patterns
         self._infer_liquidations()
+    
+    def ingest_liquidations(self, liquidations: pd.DataFrame):
+        """Ingest real liquidation data from collectors.
+        
+        This supplements the inferred liquidations from trade patterns with
+        actual liquidation data from exchange APIs/websockets.
+        
+        Args:
+            liquidations: DataFrame with columns:
+                - timestamp: liquidation timestamp
+                - exchange: exchange name
+                - symbol: trading pair
+                - side: 'buy' or 'sell'
+                - price: liquidation price
+                - quantity: liquidated quantity
+                - value_usd: USD value of liquidation
+        """
+        if liquidations is None or liquidations.empty:
+            return
+        
+        df = liquidations.copy()
+        
+        # Normalize timestamp
+        if 'timestamp' in df.columns:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce', utc=True)
+        
+        # Normalize columns
+        required_cols = ['timestamp', 'exchange', 'symbol', 'side', 'price', 'quantity', 'value_usd']
+        for col in required_cols:
+            if col not in df.columns:
+                if col == 'value_usd' and 'quantity' in df.columns and 'price' in df.columns:
+                    df['value_usd'] = df['quantity'] * df['price']
+                else:
+                    df[col] = None
+        
+        # Append to existing liquidations
+        if self._real_liquidations.empty:
+            self._real_liquidations = df[required_cols]
+        else:
+            self._real_liquidations = pd.concat(
+                [self._real_liquidations, df[required_cols]], 
+                ignore_index=True
+            ).drop_duplicates().sort_values('timestamp')
+        
+        # Apply cutoff if configured
+        if self.cutoff_hours is not None:
+            cutoff_time = pd.Timestamp.now(tz='UTC') - pd.Timedelta(hours=self.cutoff_hours)
+            self._real_liquidations = self._real_liquidations[
+                self._real_liquidations['timestamp'] >= cutoff_time
+            ]
     
     def _infer_liquidations(self):
         """Detect liquidation-like events from trade patterns + funding/OI signals."""
@@ -993,7 +1051,8 @@ class Liquidator:
             ""
         ]
         
-        for idx, zone in zones.nlargest(10, 'strength').iterrows():
+        for i, zone in enumerate(zones.nlargest(10, 'strength').iterrows(), 1):
+            idx, zone = zone
             side = zone['dominant_side']
             quality = zone['quality_label']
             
@@ -1005,12 +1064,12 @@ class Liquidator:
             else:
                 color = 'color.new(color.gray, 85)'
             
-            lines.append(f"// Zone {idx+1}: {side.upper()} - Quality: {quality.upper()}")
-            lines.append(f"zone_{idx}_high = {zone['entry_high']:.2f}")
-            lines.append(f"zone_{idx}_low = {zone['entry_low']:.2f}")
-            lines.append(f"plot(zone_{idx}_high, 'Zone {idx+1} High', {color}, 1)")
-            lines.append(f"plot(zone_{idx}_low, 'Zone {idx+1} Low', {color}, 1)")
-            lines.append(f"fill(plot(zone_{idx}_high, display=display.none), plot(zone_{idx}_low, display=display.none), {color})")
+            lines.append(f"// Zone {i}: {side.upper()} - Quality: {quality.upper()}")
+            lines.append(f"zone_{i}_high = {zone['entry_high']:.2f}")
+            lines.append(f"zone_{i}_low = {zone['entry_low']:.2f}")
+            lines.append(f"plot(zone_{i}_high, 'Zone {i} High', {color}, 1)")
+            lines.append(f"plot(zone_{i}_low, 'Zone {i} Low', {color}, 1)")
+            lines.append(f"fill(plot(zone_{i}_high, display=display.none), plot(zone_{i}_low, display=display.none), {color})")
             lines.append("")
         
         return "\n".join(lines)
@@ -1097,9 +1156,14 @@ class Liquidator:
         # Get current price
         if current_price is None:
             if not self._trades.empty:
-                current_price = self._trades['price'].iloc[-1]
+                current_price = float(self._trades['price'].iloc[-1])
+            elif not zones.empty and 'price_mean' in zones.columns:
+                current_price = float(zones['price_mean'].mean())
             else:
-                current_price = zones['price_mean'].mean()
+                current_price = 0.0  # fallback default
+        
+        # Ensure current_price is float
+        current_price = float(current_price)
         
         # Get current funding rate if available
         funding_rate = 0.0
