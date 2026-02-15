@@ -474,7 +474,8 @@ class Liquidator:
             # Prepare numpy arrays for numba
             prices = df['price'].to_numpy(dtype=np.float64)
             usd_values = df['usd_value'].fillna(0.0).to_numpy(dtype=np.float64)
-            timestamps_seconds = (df['timestamp'].astype(np.int64).to_numpy() / 1e9).astype(np.float64)
+            # Force datetime64[ns] for pandas 2.x compatibility (default changed from ns to us)
+            timestamps_seconds = df['timestamp'].apply(lambda x: x.timestamp()).to_numpy(dtype=np.float64)
             
             # Encode sides: 0=unknown, 1=long, 2=short
             side_map = {'long': 1, 'short': 2}

@@ -70,8 +70,13 @@ def cluster_prices_numba(prices, usd_values, timestamps_seconds, sides_encoded, 
         p = prices[i]
         cluster_mean = cluster_price_sum / cluster_count
         
-        # Check if within merge threshold
-        if abs(p - cluster_mean) / cluster_mean <= pct_merge:
+        # Check if within merge threshold - compare against boundaries, not shifting mean
+        # This prevents the "snowball" bug where narrow ranges collapse to single zone
+        price_range = cluster_price_max - cluster_price_min
+        cluster_center = (cluster_price_max + cluster_price_min) / 2.0
+        max_allowed_distance = cluster_center * pct_merge
+        
+        if abs(p - cluster_center) <= max_allowed_distance and (price_range == 0 or abs(p - cluster_center) / cluster_center <= pct_merge):
             # Add to current cluster
             cluster_price_sum += p
             cluster_price_min = min(cluster_price_min, p)
