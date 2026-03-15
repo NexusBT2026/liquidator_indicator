@@ -66,8 +66,4 @@ build/
 *.html
 
 # Project planning (private)
-PROJECT_STATUS.md
-YOUTUBE_SCRIPT_*.md
-
-# Bug reports (kept locally, not in repo)
-LIQUIDATOR_INDICATOR_BUG_REPORT.md
+.draft/
