@@ -5,6 +5,31 @@ All notable changes to **liquidator_indicator** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0] - 2026-03-15
+
+### Added
+- **Cascade Chain Detection** — `add_cascade_analysis(zones_df, current_price, funding_rate, cascade_window_pct, chain_gap_pct)`
+  - Scores the probability that a liquidation zone triggers a multi-zone cascade chain
+  - Walks adjacent sorted zones and links them when price gap ≤ `chain_gap_pct`
+  - New columns: `cascade_probability` (0–100), `cascade_chain_length`, `cascade_target_price`
+  - Score formula: `trigger_score × strength_score × chain_factor × funding_multiplier`
+  - Funding rate bias: positive funding amplifies downward cascade probability; negative amplifies upward
+- **Gravity Model** — `add_gravity_scores(zones_df, current_price)`
+  - Calculates gravitational pull of each zone using `gravity = total_usd / distance²`
+  - New columns: `gravity` (raw force), `gravity_rank` (1 = strongest magnet = next probable target)
+  - Identifies the most probable next price target based on liquidity mass and proximity
+- **Quick Target Lookup** — `get_gravity_target(zones_df, current_price)`
+  - Returns the single highest-gravity zone as a dict — one-line "next target" lookup
+- **19 tests** in `tests/test_core.py` (all passing), including 9 cascade tests and 9 gravity tests
+
+### Changed
+- Cascade detection upgraded from event-level (single candle) to chain-level (multi-zone sweep)
+- Gravity concept elevated from implicit time-decay scoring to explicit `liquidity / distance²` formula
+
+### Backward Compatible
+- All existing `compute_zones()` output unchanged
+- New methods are opt-in and return copies — no side effects on instance state
+
 ## [0.0.8] - 2026-02-05
 
 ### Added

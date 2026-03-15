@@ -715,6 +715,229 @@ class Liquidator:
         
         return combined.reset_index(drop=True)
 
+    def add_cascade_analysis(
+        self,
+        zones_df: pd.DataFrame,
+        current_price: float,
+        funding_rate: float = 0.0,
+        cascade_window_pct: float = 0.05,
+        chain_gap_pct: float = 0.01,
+    ) -> pd.DataFrame:
+        """Add cascade chain analysis to a zones DataFrame.
+
+        Builds on existing volume-spike cascade detection by scoring multi-zone
+        chain reactions.  For each zone this method calculates:
+
+        - ``cascade_probability``  (0–100): likelihood this zone triggers a chain.
+        - ``cascade_chain_length`` (int):   number of zones swept if it triggers.
+        - ``cascade_target_price`` (float): end price of the cascade chain.
+
+        Algorithm
+        ---------
+        1. Zones below ``current_price`` are potential *long* liquidation cascade
+           triggers (price falls through them).  Zones above are potential *short*
+           liquidation cascade triggers (price rises through them).
+        2. For each trigger zone, walk adjacent sorted zones while the price gap
+           between consecutive zones stays within ``chain_gap_pct``.
+        3. Score = ``trigger_score × strength_score × chain_factor × funding_multiplier``
+           where:
+           - ``trigger_score``      = ``exp(-distance / cascade_window_pct)``
+           - ``strength_score``     = ``log1p(zone_usd) / log1p(max_usd)``
+           - ``chain_factor``       = ``log1p(chain_length)``
+           - ``funding_multiplier`` = 1 + boost when funding bias aligns with cascade direction
+
+        Args:
+            zones_df:            Output from :meth:`compute_zones`.
+            current_price:       Current market price (must be > 0).
+            funding_rate:        Current funding rate.  Positive = longs pay
+                                 (bearish bias, downward cascades more likely).
+                                 Negative = shorts pay (bullish bias).
+            cascade_window_pct:  Max distance from ``current_price`` (as a fraction)
+                                 within which a zone is considered a trigger candidate.
+                                 Default 0.05 (5 %).
+            chain_gap_pct:       Max price gap between consecutive zones (as a
+                                 fraction) for the chain to continue.
+                                 Default 0.01 (1 %).
+
+        Returns:
+            Copy of ``zones_df`` with three new columns appended.
+        """
+        if zones_df.empty:
+            return zones_df
+
+        if current_price <= 0:
+            df = zones_df.copy()
+            df['cascade_probability'] = 0.0
+            df['cascade_chain_length'] = 0
+            df['cascade_target_price'] = None
+            return df
+
+        df = zones_df.copy().reset_index(drop=True)
+        zones_sorted = df.sort_values('price_mean').reset_index(drop=True)
+        max_usd = max(float(zones_sorted['total_usd'].max()), 1.0)
+
+        cascade_probs = []
+        chain_lengths = []
+        chain_targets = []
+
+        for _, row in df.iterrows():
+            zone_price = float(row['price_mean'])
+            zone_usd = float(row['total_usd'])
+            distance_pct = abs(zone_price - current_price) / current_price
+
+            # How likely does price reach this zone (exponential decay with distance)
+            trigger_score = math.exp(-distance_pct / max(cascade_window_pct, 0.001))
+
+            # Normalised zone liquidity relative to the largest zone
+            strength_score = math.log1p(zone_usd) / math.log1p(max_usd)
+
+            # Cascade direction and adjacent zones to walk
+            if zone_price <= current_price:
+                # Long cascade: zones swept as price falls below this zone
+                adjacent = zones_sorted[
+                    zones_sorted['price_mean'] < zone_price
+                ].sort_values('price_mean', ascending=False)
+                direction = 'down'
+            else:
+                # Short cascade: zones swept as price rises above this zone
+                adjacent = zones_sorted[
+                    zones_sorted['price_mean'] > zone_price
+                ].sort_values('price_mean', ascending=True)
+                direction = 'up'
+
+            # Walk the chain: continue while consecutive zones are close enough
+            chain_length = 1
+            chain_target = zone_price
+            prev_price = zone_price
+
+            for _, next_zone in adjacent.iterrows():
+                next_price = float(next_zone['price_mean'])
+                gap_pct = abs(next_price - prev_price) / prev_price
+                if gap_pct <= chain_gap_pct:
+                    chain_length += 1
+                    chain_target = next_price
+                    prev_price = next_price
+                else:
+                    break  # gap too large — chain stops here
+
+            # More zones in chain = stronger cascade potential
+            chain_factor = math.log1p(chain_length)
+
+            # Funding bias: amplify probability when funding aligns with direction
+            if direction == 'down' and funding_rate > 0.001:
+                funding_multiplier = 1.0 + min(funding_rate * 50.0, 0.5)
+            elif direction == 'up' and funding_rate < -0.001:
+                funding_multiplier = 1.0 + min(abs(funding_rate) * 50.0, 0.5)
+            else:
+                funding_multiplier = 1.0
+
+            raw_prob = trigger_score * strength_score * chain_factor * funding_multiplier
+            cascade_prob = round(min(100.0, raw_prob * 100.0), 1)
+
+            cascade_probs.append(cascade_prob)
+            chain_lengths.append(chain_length)
+            chain_targets.append(round(chain_target, 8))
+
+        df['cascade_probability'] = cascade_probs
+        df['cascade_chain_length'] = chain_lengths
+        df['cascade_target_price'] = chain_targets
+
+        return df
+
+    def add_gravity_scores(
+        self,
+        zones_df: pd.DataFrame,
+        current_price: float,
+        min_distance_pct: float = 0.0001,
+    ) -> pd.DataFrame:
+        """Add gravitational pull scores to a zones DataFrame.
+
+        Models each liquidation cluster as a gravitational body.  Clusters with
+        more liquidity and/or closer to the current price exert a stronger pull
+        on price — analogous to how prop-desk liquidity maps identify the "next
+        probable target".
+
+        Formula
+        -------
+        ``gravity = total_usd / distance²``
+
+        where ``distance = abs(zone_price - current_price)``, floored to
+        ``current_price * min_distance_pct`` so we never divide by zero for a
+        zone sitting exactly at the current price.
+
+        Two columns are added:
+
+        - ``gravity``        — raw gravitational force (larger = stronger magnet).
+        - ``gravity_rank``   — rank 1 = strongest pull (i.e. next probable target).
+
+        A convenience helper :meth:`get_gravity_target` can then surface the top-ranked
+        zone directly.
+
+        Args:
+            zones_df:          Output from :meth:`compute_zones`.
+            current_price:     Current market price (must be > 0).
+            min_distance_pct:  Minimum distance as a fraction of current price used
+                               to floor the denominator.  Default 0.01 % (0.0001).
+
+        Returns:
+            Copy of ``zones_df`` with ``gravity`` and ``gravity_rank`` appended.
+        """
+        if zones_df.empty:
+            return zones_df
+
+        if current_price <= 0:
+            df = zones_df.copy()
+            df['gravity'] = 0.0
+            df['gravity_rank'] = 0
+            return df
+
+        df = zones_df.copy().reset_index(drop=True)
+        min_distance = current_price * max(min_distance_pct, 1e-9)
+
+        gravities = []
+        for _, row in df.iterrows():
+            zone_price = float(row['price_mean'])
+            zone_usd   = float(row['total_usd'])
+            distance   = max(abs(zone_price - current_price), min_distance)
+            gravity    = zone_usd / (distance ** 2)
+            gravities.append(gravity)
+
+        df['gravity'] = gravities
+        # Rank: 1 = highest gravity (strongest pull)
+        df['gravity_rank'] = df['gravity'].rank(ascending=False, method='min').astype(int)
+
+        return df
+
+    def get_gravity_target(
+        self,
+        zones_df: pd.DataFrame,
+        current_price: float,
+    ) -> Optional[Dict]:
+        """Return the single zone with the strongest gravitational pull.
+
+        Calls :meth:`add_gravity_scores` internally, then returns the top-ranked
+        zone as a plain dict, or ``None`` if ``zones_df`` is empty.
+
+        Example return value::
+
+            {
+                'price_mean': 70915.0,
+                'gravity': 1234567.89,
+                'gravity_rank': 1,
+                'total_usd': 6200000.0,
+                'dominant_side': 'long',
+                ...
+            }
+        """
+        if zones_df.empty or current_price <= 0:
+            return None
+
+        scored = self.add_gravity_scores(zones_df, current_price)
+        top = scored.loc[scored['gravity_rank'] == 1]
+        if top.empty:
+            return None
+        return top.iloc[0].to_dict()
+
     def _compute_strength(self, usd_total: float, count: int, last_ts: Optional[pd.Timestamp]):
         """Heuristic scoring: combine usd_total (log), count, and recency (time decay)."""
         a = math.log1p(usd_total)
