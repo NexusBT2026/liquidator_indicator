@@ -1,6 +1,6 @@
 [project]
 name = "liquidator_indicator"
-version = "0.1.0"
+version = "0.1.1"
 description = "Lightweight liquidation zone indicator with multi-signal detection and visual chart integration"
 license = {text = "MIT"}
 requires-python = ">=3.9"
@@ -27,6 +27,17 @@ classifiers = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--capture=fd"
+markers = [
+    "live: marks tests that require live exchange connections (deselect with '-m not live')",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
 
 [build-system]
 requires = ["setuptools>=61.0","wheel"]

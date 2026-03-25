@@ -102,7 +102,7 @@ class BinanceLiquidationCollector:
                 pass
     
     def _run_ws(self):
-        """WebSocket event loop."""
+        """WebSocket event loop with automatic keepalive pings."""
         while self._running:
             try:
                 self._ws = websocket.WebSocketApp(
@@ -111,11 +111,13 @@ class BinanceLiquidationCollector:
                     on_error=self._on_error,
                     on_close=self._on_close
                 )
-                self._ws.run_forever()
+                # ping_interval sends WebSocket-level ping frames every 20s.
+                # Binance server expects this to keep the connection alive.
+                self._ws.run_forever(ping_interval=20, ping_timeout=10)
             except Exception as e:
                 logger.error(f"Binance WebSocket error: {e}")
-                if self._running:
-                    time.sleep(5)  # Reconnect after 5 seconds
+            if self._running:
+                time.sleep(5)  # Always wait before reconnecting
     
     def _on_message(self, ws, message):
         """Parse liquidation message."""
@@ -201,6 +203,7 @@ class BybitLiquidationCollector:
         self._liquidations = []
         self._ws = None
         self._thread = None
+        self._ping_thread = None
         self._running = False
         self._lock = threading.Lock()
         
@@ -215,6 +218,8 @@ class BybitLiquidationCollector:
         self._running = True
         self._thread = threading.Thread(target=self._run_ws, daemon=True)
         self._thread.start()
+        self._ping_thread = threading.Thread(target=self._run_ping, daemon=True)
+        self._ping_thread.start()
         logger.info(f"BybitLiquidationCollector started for {self.symbols}")
     
     def stop(self):
@@ -226,6 +231,16 @@ class BybitLiquidationCollector:
             except Exception:
                 pass
     
+    def _run_ping(self):
+        """Send Bybit application-level ping every 20s to keep connection alive."""
+        while self._running:
+            time.sleep(20)
+            if self._ws and self._running:
+                try:
+                    self._ws.send(json.dumps({"op": "ping"}))
+                except Exception:
+                    pass
+
     def _run_ws(self):
         """WebSocket event loop."""
         while self._running:
@@ -240,8 +255,8 @@ class BybitLiquidationCollector:
                 self._ws.run_forever()
             except Exception as e:
                 logger.error(f"Bybit WebSocket error: {e}")
-                if self._running:
-                    time.sleep(5)
+            if self._running:
+                time.sleep(5)  # Always wait before reconnecting
     
     def _on_open(self, ws):
         """Subscribe to liquidation streams."""
@@ -258,8 +273,9 @@ class BybitLiquidationCollector:
         try:
             data = json.loads(message)
             
-            # Skip subscription confirmations
-            if data.get('op') == 'subscribe':
+            # Skip subscription confirmations and pong responses
+            op = data.get('op', '')
+            if op in ('subscribe', 'pong'):
                 return
             
             if 'data' not in data:
@@ -327,13 +343,20 @@ class OKXLiquidationCollector:
             symbols: List of symbols (e.g., ['BTC-USDT', 'ETH-USDT'])
             callback: Optional function called on each liquidation
         """
-        # OKX uses format BTC-USDT-SWAP for perpetuals
-        self.symbols = [s.upper() if '-USDT-SWAP' in s.upper() else f"{s.replace('USDT', '').upper()}-USDT-SWAP" for s in symbols]
+        # OKX liquidation-orders API requires uly (underlying) e.g. 'BTC-USDT'
+        # Convert any format: 'BTC', 'BTCUSDT', 'BTC-USDT-SWAP' -> 'BTC-USDT'
+        def _to_uly(s):
+            s = s.upper().replace('-SWAP', '').replace('USDT', '-USDT').strip('-')
+            if not s.endswith('-USDT'):
+                s = f"{s}-USDT"
+            return s
+        self.symbols = [_to_uly(s) for s in symbols]
         self.callback = callback
         
         self._liquidations = []
         self._ws = None
         self._thread = None
+        self._ping_thread = None
         self._running = False
         self._lock = threading.Lock()
         
@@ -352,6 +375,8 @@ class OKXLiquidationCollector:
         self._running = True
         self._thread = threading.Thread(target=self._run_ws, daemon=True)
         self._thread.start()
+        self._ping_thread = threading.Thread(target=self._run_ping, daemon=True)
+        self._ping_thread.start()
         logger.info(f"OKXLiquidationCollector started for {self.symbols}")
     
     def stop(self):
@@ -363,37 +388,61 @@ class OKXLiquidationCollector:
             except Exception:
                 pass
     
+    def _parse_details(self, details, symbol):
+        """Parse a details array from OKX REST or WebSocket into liquidation dicts."""
+        results = []
+        for d in details:
+            try:
+                price = float(d.get('bkPx', 0))
+                qty = float(d.get('sz', 0))
+                if price <= 0 or qty <= 0:
+                    continue
+                results.append({
+                    'exchange': 'okx',
+                    'symbol': symbol,
+                    'side': d.get('side', '').upper(),   # 'buy' = short liq, 'sell' = long liq
+                    'price': price,
+                    'quantity': qty,
+                    'value_usd': price * qty,
+                    'timestamp': datetime.fromtimestamp(int(d.get('ts', d.get('time', 0))) / 1000, tz=timezone.utc),
+                    'raw': d
+                })
+            except Exception:
+                pass
+        return results
+
     def _fetch_recent_liquidations(self):
-        """Fetch recent liquidations via REST API."""
-        for symbol in self.symbols:
+        """Fetch recent liquidations via REST API using uly (underlying) param."""
+        for uly in self.symbols:
             try:
                 params = {
-                    'instId': symbol,
-                    'state': 'filled',  # Completed liquidations
+                    'instType': 'SWAP',
+                    'uly': uly,
+                    'state': 'filled',
                     'limit': 100
                 }
                 response = requests.get(self.rest_url, params=params, timeout=10)
                 data = response.json()
-                
-                if data.get('code') == '0' and 'data' in data:
-                    for liq_data in data['data']:
-                        liq = {
-                            'exchange': 'okx',
-                            'symbol': liq_data['instId'],
-                            'side': liq_data['side'].upper(),
-                            'price': float(liq_data.get('bkPx', 0)),  # Bankruptcy price
-                            'quantity': float(liq_data.get('sz', 0)),
-                            'value_usd': float(liq_data.get('bkPx', 0)) * float(liq_data.get('sz', 0)),
-                            'timestamp': datetime.fromtimestamp(int(liq_data['cTime']) / 1000, tz=timezone.utc),
-                            'raw': liq_data
-                        }
-                        
+
+                if data.get('code') == '0':
+                    for record in data.get('data', []):
+                        liqs = self._parse_details(record.get('details', []), f"{uly}-SWAP")
                         with self._lock:
-                            self._liquidations.append(liq)
-                            
+                            self._liquidations.extend(liqs)
+
             except Exception as e:
-                logger.error(f"Error fetching OKX liquidations for {symbol}: {e}")
+                logger.error(f"Error fetching OKX liquidations for {uly}: {e}")
     
+    def _run_ping(self):
+        """Send OKX application-level 'ping' every 20s to keep connection alive."""
+        while self._running:
+            time.sleep(20)
+            if self._ws and self._running:
+                try:
+                    self._ws.send('ping')
+                except Exception:
+                    pass
+
     def _run_ws(self):
         """WebSocket event loop."""
         while self._running:
@@ -410,53 +459,52 @@ class OKXLiquidationCollector:
                 logger.error(f"OKX WebSocket error: {e}")
                 if self._running:
                     time.sleep(5)
-    
+
     def _on_open(self, ws):
-        """Subscribe to liquidation streams."""
-        for symbol in self.symbols:
-            subscribe_msg = {
-                "op": "subscribe",
-                "args": [{
-                    "channel": "liquidation-orders",
-                    "instType": "SWAP",
-                    "instId": symbol
-                }]
-            }
-            ws.send(json.dumps(subscribe_msg))
-            logger.info(f"Subscribed to OKX liquidation-orders {symbol}")
+        """Subscribe to liquidation-orders channel — OKX broadcasts all SWAP liquidations."""
+        subscribe_msg = {
+            "op": "subscribe",
+            "args": [{
+                "channel": "liquidation-orders",
+                "instType": "SWAP"
+            }]
+        }
+        ws.send(json.dumps(subscribe_msg))
+        logger.info("Subscribed to OKX liquidation-orders SWAP (all symbols, filtered client-side)")
     
     def _on_message(self, ws, message):
         """Parse liquidation message."""
         try:
+            # OKX responds to our 'ping' text with 'pong' — ignore it
+            if message == 'pong':
+                return
+
             data = json.loads(message)
             
-            # Skip subscription confirmations
-            if data.get('event') == 'subscribe':
+            # Skip all event messages (subscribe, unsubscribe, error, login)
+            if 'event' in data:
                 return
             
             if 'data' not in data:
                 return
-            
-            # data['data'] is the list of liquidation details
-            for liq_data in data['data']:
-                liq = {
-                    'exchange': 'okx',
-                    'symbol': data['arg']['instId'],
-                    'side': liq_data['side'].upper(),
-                    'price': float(liq_data.get('bkPx', 0)),
-                    'quantity': float(liq_data.get('sz', 0)),
-                    'value_usd': float(liq_data.get('bkPx', 0)) * float(liq_data.get('sz', 0)),
-                    'timestamp': datetime.fromtimestamp(int(liq_data['ts']) / 1000, tz=timezone.utc),
-                    'raw': liq_data
-                }
-                
+
+            # uly comes from each data record — arg only has instType
+            # OKX broadcasts ALL SWAP liquidations; filter client-side
+            for record in data['data']:
+                inst_id = record.get('instId', '')
+                uly = record.get('uly', '')
+                # If user specified symbols, only keep matching ones
+                if self.symbols and uly not in self.symbols:
+                    continue
+                details = record.get('details', [])
+                liqs = self._parse_details(details, inst_id or uly)
                 with self._lock:
-                    self._liquidations.append(liq)
+                    self._liquidations.extend(liqs)
                     if len(self._liquidations) > 10000:
                         self._liquidations = self._liquidations[-10000:]
-                
                 if self.callback:
-                    self.callback(liq)
+                    for liq in liqs:
+                        self.callback(liq)
                     
         except Exception as e:
             logger.error(f"Error parsing OKX liquidation: {e}")

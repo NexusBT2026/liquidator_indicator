@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Test v0.1.0 backward compatibility.
 
 Verifies:
@@ -7,9 +8,9 @@ Verifies:
 4. New methods are truly opt-in (compute_zones() output unchanged)
 5. Edge cases: empty DataFrames, invalid prices, zero funding
 """
+import sys
 import pandas as pd
 import numpy as np
-import sys
 from datetime import timezone
 
 print("=" * 70)
@@ -55,10 +56,10 @@ def make_liq_data(prices, base_time=None):
 print("\nTest 1: Version String")
 print("-" * 70)
 
-if __version__ == "0.1.0":
-    print(f"✅ __version__ == '0.1.0'")
+if __version__.startswith("0.1."):
+    print(f"✅ __version__ == '{__version__}' (0.1.x)")
 else:
-    print(f"❌ __version__ is '{__version__}' — expected '0.1.0'")
+    print(f"❌ __version__ is '{__version__}' — expected 0.1.x")
 
 # ── Test 2: v0.0.9 API unchanged ────────────────────────────────────────────
 print("\nTest 2: v0.0.9 Core API Still Works (Regression Check)")
