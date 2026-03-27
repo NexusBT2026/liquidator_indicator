@@ -10,4 +10,4 @@ try:
 except ImportError:
     __all__ = ["Liquidator", "compute_vwap", "compute_atr", "exchanges"]
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"

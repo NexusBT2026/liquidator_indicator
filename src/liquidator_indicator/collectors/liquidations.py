@@ -263,10 +263,10 @@ class BybitLiquidationCollector:
         for symbol in self.symbols:
             subscribe_msg = {
                 "op": "subscribe",
-                "args": [f"liquidation.{symbol}"]
+                "args": [f"allLiquidation.{symbol}"]
             }
             ws.send(json.dumps(subscribe_msg))
-            logger.info(f"Subscribed to Bybit liquidation.{symbol}")
+            logger.info(f"Subscribed to Bybit allLiquidation.{symbol}")
     
     def _on_message(self, ws, message):
         """Parse liquidation message."""
@@ -281,26 +281,28 @@ class BybitLiquidationCollector:
             if 'data' not in data:
                 return
             
-            liq_data = data['data']
-            
-            liq = {
-                'exchange': 'bybit',
-                'symbol': liq_data.get('symbol', ''),
-                'side': liq_data.get('side', '').upper(),
-                'price': float(liq_data.get('price', 0)),
-                'quantity': float(liq_data.get('size', 0)),
-                'value_usd': float(liq_data.get('price', 0)) * float(liq_data.get('size', 0)),
-                'timestamp': datetime.fromtimestamp(int(liq_data.get('updatedTime', 0)) / 1000, tz=timezone.utc),
-                'raw': liq_data
-            }
-            
-            with self._lock:
-                self._liquidations.append(liq)
-                if len(self._liquidations) > 10000:
-                    self._liquidations = self._liquidations[-10000:]
-            
-            if self.callback:
-                self.callback(liq)
+            # data['data'] is a list of liquidation records
+            for liq_data in data['data']:
+                price = float(liq_data.get('p', 0))
+                qty = float(liq_data.get('v', 0))
+                liq = {
+                    'exchange': 'bybit',
+                    'symbol': liq_data.get('s', ''),
+                    'side': liq_data.get('S', '').upper(),  # Buy=long liq, Sell=short liq
+                    'price': price,
+                    'quantity': qty,
+                    'value_usd': price * qty,
+                    'timestamp': datetime.fromtimestamp(int(liq_data.get('T', 0)) / 1000, tz=timezone.utc),
+                    'raw': liq_data
+                }
+
+                with self._lock:
+                    self._liquidations.append(liq)
+                    if len(self._liquidations) > 10000:
+                        self._liquidations = self._liquidations[-10000:]
+
+                if self.callback:
+                    self.callback(liq)
                 
         except Exception as e:
             logger.error(f"Error parsing Bybit liquidation: {e}")
